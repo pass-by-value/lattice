@@ -9,13 +9,11 @@ mainApp.controller 'BaseController', ['$scope', '$location', '$route', '$q', '$f
     AppData, AppPref, Item, Itemizer, Minioner, Resulter, Jobber, ArgInfo, Runner, Wheeler,
     Commander, Pagerage, SaltApiSrvc, SaltApiEvtSrvc, SessionStore, ErrorReporter, HighstateCheck, EventDelegate, JobDelegate ) ->
 
-
-      if !AppData.get('commands')?
-          AppData.set('commands', new Itemizer())
-      $scope.commands = AppData.get('commands')
-
       $scope.getAppData = () ->
         AppData
+
+      $scope.getCommands = () ->
+        return AppData.getCommands()
 
       $scope.getJobs = () ->
         return AppData.getJobs()
@@ -59,6 +57,9 @@ mainApp.controller 'BaseController', ['$scope', '$location', '$route', '$q', '$f
               result = data.return?[0]
               if result
                   job = JobDelegate.startJob(result, cmd)
+                  if job.done
+                    $scope.assignGrains(job)
+                    return #early return
                   job.commit($q).then (donejob) ->
                       $scope.assignGrains(donejob)
                       $scope.graining = false if noAjax
@@ -78,9 +79,9 @@ mainApp.controller 'BaseController', ['$scope', '$location', '$route', '$q', '$f
           return job
 
       $scope.snagCommand = (name, cmds) -> #get or create Command
-          unless $scope.commands.get(name)?
-              $scope.commands.set(name, new Commander(name, cmds))
-          return ($scope.commands.get(name))
+          unless $scope.getCommands().get(name)?
+              $scope.getCommands().set(name, new Commander(name, cmds))
+          return ($scope.getCommands().get(name))
 
       $scope.fetchActives = () ->
           cmd =
@@ -266,6 +267,76 @@ mainApp.controller 'BaseController', ['$scope', '$location', '$route', '$q', '$f
                 ErrorReporter.addAlert("warning", "HTTP Fetch Docs Failed!")
                 return false
             return true
+
+
+        $scope.tagMap = {}
+
+        $scope.lookupJID = (job_id) ->
+          command =
+            fun: 'runner.jobs.lookup_jid'
+            kwarg:
+              jid: job_id
+
+          SaltApiSrvc.run($scope, command)
+          .success (data, status, headers, config) ->
+            result = data.return[0]
+            $scope.tagMap[result.tag.split('/')[2]] = job_id
+          return true
+
+        $scope.cachedJIDs = []
+        $scope.failedCachedJIDs = []
+
+        $scope.$on "CacheFetch", (event, edata) ->
+          if edata?
+            $scope.cachedJIDs = _.difference($scope.cachedJIDs, [edata.jid])
+            $scope.failedCachedJIDs.push(edata.jid) unless edata.success
+          $scope.lookupJID($scope.cachedJIDs[0]) unless $scope.cachedJIDs.length == 0
+          return
+
+        $scope.preloadJobCache = () ->
+          command =
+            fun: 'runner.jobs.list_jobs'
+            tgt: []
+
+          SaltApiSrvc.run($scope, command)
+          .success (data, status, headers, config) ->
+              result = data.return[0]
+              job = JobDelegate.startRun(result, command)
+              job.commit($q).then (donejob) ->
+                for jid, val of donejob.results.items()[0].val.results()[0]
+                  cmd =
+                    fun: val.Function
+                  cmd.tgt = val.Target if val.Target?
+                  if not $scope.getJobs().get(jid)
+                    $scope.getJobs().set(jid, new Runner(jid, cmd))
+                    $scope.cachedJIDs.push(jid)
+                $scope.$emit("CacheFetch")
+              , () ->
+                ErrorReporter.addAlert("warning", "List all jobs failed! Please retry")
+                return true
+              return true
+          return true
+
+        $scope.processLookupJID = (data) ->
+          results = new Itemizer()
+          for key, val of data.return
+            result = new Resulter()
+            result.return = val
+            result.id = key
+            results.set(key, result)
+            if data.success
+              result.done = true
+              result.success = true
+              result.fail = false
+            $scope.getJobs().get($scope.tagMap[data.jid])?.results = results
+          if data.success
+            $scope.getJobs().get($scope.tagMap[data.jid])?.done = true
+            $scope.getJobs().get($scope.tagMap[data.jid])?.fail = false
+            $scope.$emit("CacheFetch", {succes: true, jid: $scope.tagMap[data.jid]})
+          if not data.success
+            $scope.getJobs().get($scope.tagMap[data.jid])?.done = false
+            $scope.getJobs().get($scope.tagMap[data.jid])?.fail = true
+            $scope.$emit("CacheFetch", {succes: false, jid: $scope.tagMap[data.jid]})
 
       $scope.$on('ToggleAuth', $scope.authListener)
       $scope.$on('Activate', $scope.activateListener)
